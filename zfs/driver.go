@@ -2,6 +2,7 @@ package zfsdriver
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/clinta/go-zfs"
@@ -45,12 +46,46 @@ func NewZfsDriver(dss ...string) (*ZfsDriver, error) {
 func (zd *ZfsDriver) Create(req *volume.CreateRequest) error {
 	log.WithField("Request", req).Debug("Create")
 
-	if zfs.DatasetExists(req.Name) {
-		return fmt.Errorf("volume already exists")
+	// Parse the volume name to extract project name if it exists
+	// Docker Compose volumes are named: projectname_volumename
+	volumeName := req.Name
+	datasetName := volumeName
+	
+	// Check if this looks like a docker-compose volume (contains underscore)
+	if strings.Contains(volumeName, "_") {
+		parts := strings.SplitN(volumeName, "_", 2)
+		if len(parts) == 2 {
+			// Assume first part is project name, second is actual volume name
+			projectName := parts[0]
+			actualVolumeName := parts[1]
+			
+			// Create hierarchical structure for docker-compose projects
+			// This allows efficient recursive snapshots per project
+			if len(zd.rds) > 0 {
+				// Use the first root dataset as base
+				rootDS := zd.rds[0].Name
+				datasetName = fmt.Sprintf("%s/%s/%s", rootDS, projectName, actualVolumeName)
+				log.WithFields(log.Fields{
+					"project": projectName,
+					"volume": actualVolumeName,
+					"dataset": datasetName,
+				}).Info("Creating hierarchical dataset for docker-compose volume")
+			}
+		}
 	}
 
-	_, err := zfs.CreateDatasetRecursive(req.Name, req.Options)
-	return err
+	if zfs.DatasetExists(datasetName) {
+		return fmt.Errorf("volume already exists: %s", datasetName)
+	}
+
+	// CreateDatasetRecursive will create parent datasets if needed
+	_, err := zfs.CreateDatasetRecursive(datasetName, req.Options)
+	if err != nil {
+		return fmt.Errorf("failed to create dataset %s: %w", datasetName, err)
+	}
+	
+	log.WithField("dataset", datasetName).Info("Successfully created hierarchical dataset")
+	return nil
 }
 
 //List returns a list of zfs volumes on this host
